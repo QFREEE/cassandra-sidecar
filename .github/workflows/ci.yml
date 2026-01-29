@@ -416,7 +416,7 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/trunk' }}
 
       - name: Run build
-        run: ./gradlew --stacktrace :client-common:test :client:test :vertx-client:test :vertx-client-shaded:test
+        run: ./gradlew build --stacktrace
 
       - name: Upload test results
         if: always()
