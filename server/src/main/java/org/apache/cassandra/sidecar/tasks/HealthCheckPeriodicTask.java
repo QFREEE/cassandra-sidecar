@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
+import org.apache.cassandra.sidecar.cluster.CassandraAdapterDelegate;
 import org.apache.cassandra.sidecar.cluster.InstancesMetadata;
 import org.apache.cassandra.sidecar.cluster.instance.InstanceMetadata;
 import org.apache.cassandra.sidecar.common.server.utils.DurationSpec;
@@ -106,7 +107,14 @@ public class HealthCheckPeriodicTask implements PeriodicTask
     private Future<Void> healthCheck(InstanceMetadata instanceMetadata, AtomicInteger instanceDown)
     {
         return internalPool
-               .runBlocking(() -> instanceMetadata.delegate().healthCheck(), false)
+               .runBlocking(() -> {
+                   CassandraAdapterDelegate delegate = instanceMetadata.delegate();
+                   delegate.healthCheck();
+                   if (!delegate.isJmxUp() || !delegate.isNativeUp())
+                   {
+                       instanceDown.incrementAndGet();
+                   }
+               }, false)
                .onFailure(cause -> {
                    instanceDown.incrementAndGet();
                    LOGGER.error("Unable to complete health check on instance={}",

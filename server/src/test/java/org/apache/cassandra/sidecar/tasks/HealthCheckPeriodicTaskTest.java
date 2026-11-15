@@ -29,6 +29,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
+import com.codahale.metrics.MetricRegistry;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.junit5.Checkpoint;
@@ -37,19 +38,28 @@ import io.vertx.junit5.VertxTestContext;
 import org.apache.cassandra.sidecar.cluster.CassandraAdapterDelegate;
 import org.apache.cassandra.sidecar.cluster.InstancesMetadata;
 import org.apache.cassandra.sidecar.cluster.instance.InstanceMetadata;
+import org.apache.cassandra.sidecar.common.server.CQLSessionProvider;
+import org.apache.cassandra.sidecar.common.server.JmxClient;
+import org.apache.cassandra.sidecar.common.server.utils.DriverUtils;
 import org.apache.cassandra.sidecar.common.server.utils.MillisecondBoundConfiguration;
 import org.apache.cassandra.sidecar.concurrent.ExecutorPools;
 import org.apache.cassandra.sidecar.config.PeriodicTaskConfiguration;
 import org.apache.cassandra.sidecar.config.SidecarConfiguration;
 import org.apache.cassandra.sidecar.config.yaml.ServiceConfigurationImpl;
+import org.apache.cassandra.sidecar.exceptions.CassandraUnavailableException;
 import org.apache.cassandra.sidecar.metrics.MetricRegistryFactory;
 import org.apache.cassandra.sidecar.metrics.SidecarMetrics;
 import org.apache.cassandra.sidecar.metrics.SidecarMetricsImpl;
+import org.apache.cassandra.sidecar.metrics.instance.InstanceHealthMetrics;
+import org.apache.cassandra.sidecar.utils.CassandraVersionProvider;
 import org.apache.cassandra.sidecar.utils.InstanceMetadataFetcher;
 import org.mockito.stubbing.Answer;
 
+import static org.apache.cassandra.sidecar.exceptions.CassandraUnavailableException.Service.CQL;
 import static org.apache.cassandra.sidecar.utils.TestMetricUtils.registry;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -183,6 +193,30 @@ class HealthCheckPeriodicTaskTest
         }));
     }
 
+    @Test
+    void testInstanceReportedDownWhenCassandraIsUnreachable(VertxTestContext context)
+    {
+        CQLSessionProvider mockCqlSessionProvider = mock(CQLSessionProvider.class);
+        when(mockCqlSessionProvider.get()).thenThrow(new CassandraUnavailableException(CQL, "not available"));
+        JmxClient mockJmxClient = mock(JmxClient.class);
+        when(mockJmxClient.proxy(any(), anyString())).thenThrow(new RuntimeException("Connection refused"));
+        CassandraAdapterDelegate delegate = new CassandraAdapterDelegate(mock(Vertx.class), 1,
+                                                                         mock(CassandraVersionProvider.class),
+                                                                         mockCqlSessionProvider, mockJmxClient,
+                                                                         new DriverUtils(), null, "127.0.0.1", 9042,
+                                                                         new InstanceHealthMetrics(new MetricRegistry()));
+        InstanceMetadata mockInstance = mock(InstanceMetadata.class);
+        when(mockInstance.delegate()).thenReturn(delegate);
+        when(mockInstancesMetadata.instances()).thenReturn(Collections.singletonList(mockInstance));
+        Promise<Void> promise = Promise.promise();
+        healthCheck.execute(promise);
+        promise.future().onComplete(ar -> context.verify(() -> {
+            assertThat(metrics.server().health().cassandraInstancesDown.metric.getValue()).isEqualTo(1);
+            assertThat(metrics.server().health().cassandraInstancesUp.metric.getValue()).isEqualTo(0);
+            context.completeNow();
+        }));
+    }
+
     private List<InstanceMetadata> buildMockInstanceMetadata(Checkpoint healthCheckCheckPoint, int numberOfInstances)
     {
         return IntStream.range(0, numberOfInstances)
@@ -194,6 +228,8 @@ class HealthCheckPeriodicTaskTest
                                 healthCheckCheckPoint.flag();
                                 return null;
                             }).when(mockDelegate).healthCheck();
+                            when(mockDelegate.isJmxUp()).thenReturn(true);
+                            when(mockDelegate.isNativeUp()).thenReturn(true);
                             when(mockInstanceMetadata.delegate()).thenReturn(mockDelegate);
                             return mockInstanceMetadata;
                         })
